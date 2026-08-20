@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,309 +13,386 @@ import (
 	pb "speedcamera/internal/gen/camera"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
-	restURL         = "http://localhost:8080/api/v1/snapshots"
-	grpcURL         = "localhost:50051"
-	dbPath          = "camera.db"
-	warmup          = 10
-	iterations      = 1000
-	listDataCount   = 100 // Сколько записей добавим для теста List
-
-	testPlate       = "BENCH001"
-	testSpeed       = 160
-	testSpeedMin    = 150
-	
-	// Уникальные цвета, чтобы изолировать тесты и не загрязнять БД
-	testColorCreate = "bench_create_unique_color"
-	testColorList   = "bench_list_unique_color"
+	restURL = "http://localhost:8080/api/v1/snapshots"
+	grpcURL = "localhost:50051"
 )
 
 func main() {
-	fmt.Println("Запуск чистого бенчмарка REST, gRPC и прямого обращения к БД")
-	fmt.Printf("Warm-up: %d, Итераций: %d\n", warmup, iterations)
-	fmt.Printf("Тестовые данные: номер %s, скорость %d\n\n", testPlate, testSpeed)
-
-	// Подготавливаем данные для теста List (добавляем 100 записей)
-	fmt.Println("Подготовка тестовых данных для List...")
-	prepareListData()
-	defer cleanupListData() // Гарантируем очистку после завершения программы
-
-	// 1. Direct DB
-	fmt.Println("\nDirect DB (SQLite)")
-	dbCreateAvg := benchmarkDirectDBCreate()
-	cleanupCreateData() // Чистим записи, созданные во время Direct DB Create
-	
-	dbListAvg := benchmarkDirectDBList()
+	fmt.Println("Запуск тестовых клиентов REST и gRPC")
 	fmt.Println()
 
-	// 2. REST API
+	restPassed, restTotal := runRESTTests()
+	fmt.Println()
+
+	grpcPassed, grpcTotal := runGRPCTests()
+	fmt.Println()
+
+	fmt.Println("Итоговые результаты:")
+	fmt.Printf("REST: %d/%d тестов пройдено\n", restPassed, restTotal)
+	fmt.Printf("gRPC: %d/%d тестов пройдено\n", grpcPassed, grpcTotal)
+	fmt.Println()
+
+	if restPassed == restTotal && grpcPassed == grpcTotal {
+		fmt.Println("ВСЕ ТЕСТЫ ПРОЙДЕНЫ УСПЕШНО")
+	} else {
+		fmt.Println("ЕСТЬ ПРОВАЛЕННЫЕ ТЕСТЫ")
+	}
+}
+
+// ==========================================
+// REST Тесты
+// ==========================================
+
+func runRESTTests() (int, int) {
 	fmt.Println("REST API (HTTP)")
-	restCreateAvg := benchmarkRESTCreate()
-	cleanupCreateData() // Чистим записи, созданные во время REST Create
-	
-	restListAvg := benchmarkRESTList()
-	fmt.Println()
+	fmt.Println("----------------------------------------")
 
-	// 3. gRPC API
+	passed := 0
+	total := 0
+
+	// Тест 1: Создание снимка
+	total++
+	if testRESTCreate() {
+		passed++
+	}
+
+	// Тест 2: Получение всех записей
+	total++
+	if testRESTListAll() {
+		passed++
+	}
+
+	// Тест 3: Фильтр по цвету
+	total++
+	if testRESTListFilterColor() {
+		passed++
+	}
+
+	// Тест 4: Проверка, что ID не возвращается в List
+	total++
+	if testRESTListNoID() {
+		passed++
+	}
+
+	// Тест 5: Валидация номера (длиннее 10 символов)
+	total++
+	if testRESTCreateValidation() {
+		passed++
+	}
+
+	return passed, total
+}
+
+func testRESTCreate() bool {
+	payload := map[string]interface{}{
+		"license_plate": "TEST001",
+		"color":         "test_rest_color",
+		"speed":         120,
+	}
+	bodyBytes, _ := json.Marshal(payload)
+
+	req, _ := http.NewRequest(http.MethodPost, restURL, bytes.NewBuffer(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("  [FAIL] Create: ошибка запроса: %v\n", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		fmt.Printf("  [FAIL] Create: ожидаемый статус 201, получен %d\n", resp.StatusCode)
+		return false
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		fmt.Printf("  [FAIL] Create: ошибка парсинга ответа: %v\n", err)
+		return false
+	}
+
+	id, okID := result["id"]
+	ts, okTS := result["timestamp"]
+	if !okID || !okTS {
+		fmt.Printf("  [FAIL] Create: в ответе отсутствуют поля id или timestamp\n")
+		return false
+	}
+
+	fmt.Printf("  [PASS] Create: создан снимок с id=%v, timestamp=%v\n", id, ts)
+	return true
+}
+
+func testRESTListAll() bool {
+	resp, err := http.Get(restURL)
+	if err != nil {
+		fmt.Printf("  [FAIL] List All: ошибка запроса: %v\n", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("  [FAIL] List All: ожидаемый статус 200, получен %d\n", resp.StatusCode)
+		return false
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result []map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		fmt.Printf("  [FAIL] List All: ошибка парсинга ответа: %v\n", err)
+		return false
+	}
+
+	if len(result) == 0 {
+		fmt.Printf("  [FAIL] List All: получен пустой список\n")
+		return false
+	}
+
+	fmt.Printf("  [PASS] List All: получено %d записей\n", len(result))
+	return true
+}
+
+func testRESTListFilterColor() bool {
+	// Сначала создаем запись с уникальным цветом
+	uniqueColor := fmt.Sprintf("test_color_%d", time.Now().UnixNano())
+	payload := map[string]interface{}{
+		"license_plate": "FLT001",
+		"color":         uniqueColor,
+		"speed":         100,
+	}
+	bodyBytes, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost, restURL, bytes.NewBuffer(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := http.DefaultClient.Do(req)
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Теперь запрашиваем по фильтру
+	url := fmt.Sprintf("%s?color=%s", restURL, uniqueColor)
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Printf("  [FAIL] List Filter: ошибка запроса: %v\n", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result []map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		fmt.Printf("  [FAIL] List Filter: ошибка парсинга ответа: %v\n", err)
+		return false
+	}
+
+	if len(result) == 0 {
+		fmt.Printf("  [FAIL] List Filter: по фильтру color=%s ничего не найдено\n", uniqueColor)
+		return false
+	}
+
+	for _, item := range result {
+		if item["color"] != uniqueColor {
+			fmt.Printf("  [FAIL] List Filter: найдена запись с неверным цветом: %v\n", item["color"])
+			return false
+		}
+	}
+
+	fmt.Printf("  [PASS] List Filter: по фильтру color=%s найдено %d записей, все с корректным цветом\n", uniqueColor, len(result))
+	return true
+}
+
+func testRESTListNoID() bool {
+	resp, err := http.Get(restURL)
+	if err != nil {
+		fmt.Printf("  [FAIL] List No ID: ошибка запроса: %v\n", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result []map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		fmt.Printf("  [FAIL] List No ID: ошибка парсинга ответа: %v\n", err)
+		return false
+	}
+
+	for _, item := range result {
+		if _, exists := item["id"]; exists {
+			fmt.Printf("  [FAIL] List No ID: в ответе присутствует поле id\n")
+			return false
+		}
+	}
+
+	fmt.Printf("  [PASS] List No ID: поле id отсутствует во всех %d записях\n", len(result))
+	return true
+}
+
+func testRESTCreateValidation() bool {
+	payload := map[string]interface{}{
+		"license_plate": "TOOLONGPLATE12345", // длиннее 10 символов
+		"color":         "test",
+		"speed":         100,
+	}
+	bodyBytes, _ := json.Marshal(payload)
+
+	req, _ := http.NewRequest(http.MethodPost, restURL, bytes.NewBuffer(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("  [FAIL] Create Validation: ошибка запроса: %v\n", err)
+		return false
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusCreated {
+		fmt.Printf("  [FAIL] Create Validation: сервер принял номер длиннее 10 символов\n")
+		return false
+	}
+
+	fmt.Printf("  [PASS] Create Validation: сервер отклонил номер длиннее 10 символов (статус %d)\n", resp.StatusCode)
+	return true
+}
+
+// ==========================================
+// gRPC Тесты
+// ==========================================
+
+func runGRPCTests() (int, int) {
 	fmt.Println("gRPC API")
+	fmt.Println("----------------------------------------")
+
 	conn, err := grpc.Dial(grpcURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("Не удалось подключиться к gRPC: %v", err)
 	}
 	defer conn.Close()
-	
+
 	client := pb.NewCameraServiceClient(conn)
-	
-	grpcCreateAvg := benchmarkGRPCCreate(client)
-	cleanupCreateData() // Чистим записи, созданные во время gRPC Create
-	
-	grpcListAvg := benchmarkGRPCList(client)
-	fmt.Println()
-
-	// Итоги
-	fmt.Println("Итоговые средние значения и накладные расходы (Overhead):")
-	fmt.Printf("Direct DB Create: %v\n", dbCreateAvg)
-	fmt.Printf("REST Create:      %v (Overhead: %v)\n", restCreateAvg, restCreateAvg-dbCreateAvg)
-	fmt.Printf("gRPC Create:      %v (Overhead: %v)\n\n", grpcCreateAvg, grpcCreateAvg-dbCreateAvg)
-	
-	fmt.Printf("Direct DB List:   %v\n", dbListAvg)
-	fmt.Printf("REST List:        %v (Overhead: %v)\n", restListAvg, restListAvg-dbListAvg)
-	fmt.Printf("gRPC List:        %v (Overhead: %v)\n", grpcListAvg, grpcListAvg-dbListAvg)
-}
-
-// ==========================================
-// Подготовка и очистка данных
-// ==========================================
-
-func prepareListData() {
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		log.Fatalf("Не удалось открыть БД: %v", err)
-	}
-	defer db.Close()
-
-	stmt, err := db.Prepare("INSERT INTO snapshots (license_plate, color, speed, timestamp) VALUES (?, ?, ?, ?)")
-	if err != nil {
-		log.Fatalf("Ошибка подготовки запроса: %v", err)
-	}
-	defer stmt.Close()
-
-	for i := 0; i < listDataCount; i++ {
-		_, err := stmt.Exec(testPlate, testColorList, testSpeed, time.Now().UTC())
-		if err != nil {
-			log.Fatalf("Ошибка добавления тестовых данных для List: %v", err)
-		}
-	}
-	fmt.Printf("Добавлено %d записей с цветом '%s' для теста List.\n", listDataCount, testColorList)
-}
-
-func cleanupListData() {
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return
-	}
-	defer db.Close()
-	db.Exec("DELETE FROM snapshots WHERE color = ?", testColorList)
-	fmt.Println("Тестовые данные для List удалены.")
-}
-
-func cleanupCreateData() {
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return
-	}
-	defer db.Close()
-	db.Exec("DELETE FROM snapshots WHERE color = ?", testColorCreate)
-}
-
-// ==========================================
-// Direct DB (SQLite)
-// ==========================================
-
-func benchmarkDirectDBCreate() time.Duration {
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		log.Fatalf("Не удалось открыть БД: %v", err)
-	}
-	defer db.Close()
-
-	stmt, err := db.Prepare("INSERT INTO snapshots (license_plate, color, speed, timestamp) VALUES (?, ?, ?, ?)")
-	if err != nil {
-		log.Fatalf("Ошибка подготовки запроса: %v", err)
-	}
-	defer stmt.Close()
-
-	// Warm-up
-	for i := 0; i < warmup; i++ {
-		stmt.Exec(testPlate, testColorCreate, testSpeed, time.Now().UTC())
-	}
-
-	var total time.Duration
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		res, _ := stmt.Exec(testPlate, testColorCreate, testSpeed, time.Now().UTC())
-		_, _ = res.LastInsertId()
-		total += time.Since(start)
-	}
-	
-	avg := total / time.Duration(iterations)
-	fmt.Printf("Create (среднее за %d итераций): %v\n", iterations, avg)
-	return avg
-}
-
-func benchmarkDirectDBList() time.Duration {
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		log.Fatalf("Не удалось открыть БД: %v", err)
-	}
-	defer db.Close()
-
-	// Warm-up
-	for i := 0; i < warmup; i++ {
-		rows, _ := db.Query("SELECT license_plate, color, speed, timestamp FROM snapshots WHERE color = ? AND speed >= ? ORDER BY id ASC", testColorList, testSpeedMin)
-		for rows.Next() {}
-		rows.Close()
-	}
-
-	var total time.Duration
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		rows, _ := db.Query("SELECT license_plate, color, speed, timestamp FROM snapshots WHERE color = ? AND speed >= ? ORDER BY id ASC", testColorList, testSpeedMin)
-		for rows.Next() {
-			var plate, color string
-			var speed int
-			var ts time.Time
-			_ = rows.Scan(&plate, &color, &speed, &ts)
-		}
-		rows.Close()
-		total += time.Since(start)
-	}
-	
-	avg := total / time.Duration(iterations)
-	fmt.Printf("List (среднее за %d итераций): %v\n", iterations, avg)
-	return avg
-}
-
-// ==========================================
-// REST (HTTP) Клиент
-// ==========================================
-
-func benchmarkRESTCreate() time.Duration {
-	payload := map[string]interface{}{
-		"license_plate": testPlate,
-		"color":         testColorCreate,
-		"speed":         testSpeed,
-	}
-	bodyBytes, _ := json.Marshal(payload)
-
-	// Warm-up
-	for i := 0; i < warmup; i++ {
-		req, _ := http.NewRequest(http.MethodPost, restURL, bytes.NewBuffer(bodyBytes))
-		req.Header.Set("Content-Type", "application/json")
-		resp, _ := http.DefaultClient.Do(req)
-		io.ReadAll(resp.Body)
-		resp.Body.Close()
-	}
-
-	var total time.Duration
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		req, _ := http.NewRequest(http.MethodPost, restURL, bytes.NewBuffer(bodyBytes))
-		req.Header.Set("Content-Type", "application/json")
-		resp, _ := http.DefaultClient.Do(req)
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		var result map[string]interface{}
-		_ = json.Unmarshal(respBody, &result)
-		total += time.Since(start)
-	}
-	
-	avg := total / time.Duration(iterations)
-	fmt.Printf("Create (среднее за %d итераций): %v\n", iterations, avg)
-	return avg
-}
-
-func benchmarkRESTList() time.Duration {
-	url := fmt.Sprintf("%s?color=%s&speed_from=%d", restURL, testColorList, testSpeedMin)
-	
-	// Warm-up
-	for i := 0; i < warmup; i++ {
-		resp, _ := http.Get(url)
-		io.ReadAll(resp.Body)
-		resp.Body.Close()
-	}
-
-	var total time.Duration
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		resp, _ := http.Get(url)
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		var result []map[string]interface{}
-		_ = json.Unmarshal(respBody, &result)
-		total += time.Since(start)
-	}
-	
-	avg := total / time.Duration(iterations)
-	fmt.Printf("List (среднее за %d итераций): %v\n", iterations, avg)
-	return avg
-}
-
-// ==========================================
-// gRPC Клиент
-// ==========================================
-
-func benchmarkGRPCCreate(client pb.CameraServiceClient) time.Duration {
 	ctx := context.Background()
 
-	// Warm-up
-	for i := 0; i < warmup; i++ {
-		client.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{
-			LicensePlate: testPlate, Color: testColorCreate, Speed: int32(testSpeed),
-		})
+	passed := 0
+	total := 0
+
+	// Тест 1: Создание снимка
+	total++
+	if testGRPCCreate(ctx, client) {
+		passed++
 	}
 
-	var total time.Duration
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		_, _ = client.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{
-			LicensePlate: testPlate,
-			Color:        testColorCreate,
-			Speed:        int32(testSpeed),
-		})
-		total += time.Since(start)
+	// Тест 2: Получение всех записей
+	total++
+	if testGRPCListAll(ctx, client) {
+		passed++
 	}
-	
-	avg := total / time.Duration(iterations)
-	fmt.Printf("Create (среднее за %d итераций): %v\n", iterations, avg)
-	return avg
+
+	// Тест 3: Фильтр по цвету
+	total++
+	if testGRPCListFilterColor(ctx, client) {
+		passed++
+	}
+
+	// Тест 4: Валидация номера (длиннее 10 символов)
+	total++
+	if testGRPCCreateValidation(ctx, client) {
+		passed++
+	}
+
+	return passed, total
 }
 
-func benchmarkGRPCList(client pb.CameraServiceClient) time.Duration {
-	ctx := context.Background()
-	req := &pb.ListSnapshotsRequest{
+func testGRPCCreate(ctx context.Context, client pb.CameraServiceClient) bool {
+	resp, err := client.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{
+		LicensePlate: "TEST002",
+		Color:        "test_grpc_color",
+		Speed:        130,
+	})
+	if err != nil {
+		fmt.Printf("  [FAIL] Create: ошибка запроса: %v\n", err)
+		return false
+	}
+
+	if resp.Id == 0 {
+		fmt.Printf("  [FAIL] Create: получен id=0\n")
+		return false
+	}
+
+	fmt.Printf("  [PASS] Create: создан снимок с id=%d, timestamp=%v\n", resp.Id, resp.Timestamp.AsTime())
+	return true
+}
+
+func testGRPCListAll(ctx context.Context, client pb.CameraServiceClient) bool {
+	resp, err := client.ListSnapshots(ctx, &pb.ListSnapshotsRequest{})
+	if err != nil {
+		fmt.Printf("  [FAIL] List All: ошибка запроса: %v\n", err)
+		return false
+	}
+
+	if len(resp.Snapshots) == 0 {
+		fmt.Printf("  [FAIL] List All: получен пустой список\n")
+		return false
+	}
+
+	fmt.Printf("  [PASS] List All: получено %d записей\n", len(resp.Snapshots))
+	return true
+}
+
+func testGRPCListFilterColor(ctx context.Context, client pb.CameraServiceClient) bool {
+	uniqueColor := fmt.Sprintf("test_grpc_color_%d", time.Now().UnixNano())
+
+	// Создаем запись с уникальным цветом
+	_, err := client.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{
+		LicensePlate: "FLT002",
+		Color:        uniqueColor,
+		Speed:        110,
+	})
+	if err != nil {
+		fmt.Printf("  [FAIL] List Filter: ошибка создания записи: %v\n", err)
+		return false
+	}
+
+	// Запрашиваем по фильтру
+	resp, err := client.ListSnapshots(ctx, &pb.ListSnapshotsRequest{
 		Filter: &pb.SnapshotFilter{
-			Color:     testColorList,
-			SpeedFrom: int32(testSpeedMin),
+			Color: uniqueColor,
 		},
+	})
+	if err != nil {
+		fmt.Printf("  [FAIL] List Filter: ошибка запроса: %v\n", err)
+		return false
 	}
 
-	// Warm-up
-	for i := 0; i < warmup; i++ {
-		client.ListSnapshots(ctx, req)
+	if len(resp.Snapshots) == 0 {
+		fmt.Printf("  [FAIL] List Filter: по фильтру color=%s ничего не найдено\n", uniqueColor)
+		return false
 	}
 
-	var total time.Duration
-	for i := 0; i < iterations; i++ {
-		start := time.Now()
-		_, _ = client.ListSnapshots(ctx, req)
-		total += time.Since(start)
+	for _, snap := range resp.Snapshots {
+		if snap.Color != uniqueColor {
+			fmt.Printf("  [FAIL] List Filter: найдена запись с неверным цветом: %s\n", snap.Color)
+			return false
+		}
 	}
-	
-	avg := total / time.Duration(iterations)
-	fmt.Printf("List (среднее за %d итераций): %v\n", iterations, avg)
-	return avg
+
+	fmt.Printf("  [PASS] List Filter: по фильтру color=%s найдено %d записей, все с корректным цветом\n", uniqueColor, len(resp.Snapshots))
+	return true
+}
+
+func testGRPCCreateValidation(ctx context.Context, client pb.CameraServiceClient) bool {
+	_, err := client.CreateSnapshot(ctx, &pb.CreateSnapshotRequest{
+		LicensePlate: "TOOLONGPLATE12345", // длиннее 10 символов
+		Color:        "test",
+		Speed:        100,
+	})
+
+	if err == nil {
+		fmt.Printf("  [FAIL] Create Validation: сервер принял номер длиннее 10 символов\n")
+		return false
+	}
+
+	fmt.Printf("  [PASS] Create Validation: сервер отклонил номер длиннее 10 символов: %v\n", err)
+	return true
 }
