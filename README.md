@@ -7,7 +7,8 @@
 ```
 ├── cmd/
 │   ├── app/          # Точка входа: запуск REST и gRPC серверов
-│   ├── client/       # Тестовый клиент с бенчмарком REST vs gRPC
+│   ├── bench/        # Бенчмарк производительности REST vs gRPC vs Direct DB
+│   ├── client/       # Тестовые клиенты: проверка корректности работы API
 │   └── seed/         # Скрипт для генерации и заполнения тестовой БД
 ├── internal/
 │   ├── domain/       # Бизнес-модели и интерфейсы
@@ -57,7 +58,7 @@ protoc --go_out=. --go-grpc_out=. proto/camera.proto
 
 ### 3. Генерация и заполнение БД
 
-Файл базы данных `camera.db` не хранится в Git. Перед запуском сервера его нужно создать и заполнить тестовыми данными (100000 (можно изменить переменную totalRecords, чтобы не ждать так долго) записей за последние 30 дней):
+Файл базы данных `camera.db` не хранится в Git. Перед запуском сервера его нужно создать и заполнить тестовыми данными (150 записей за последние 30 дней):
 
 ```bash
 go run cmd/seed/main.go
@@ -75,78 +76,54 @@ go run cmd/app/main.go
 - **REST API**: `http://localhost:8080`
 - **gRPC API**: `localhost:50051`
 
-## Тестирование API
+## Тестирование корректности API
 
-### REST API
-
-#### Linux / macOS (Bash / Zsh)
-
-Используйте стандартный `curl`. Обратите внимание на одинарные кавычки для JSON, чтобы избежать проблем с экранированием.
-
-**Создать снимок:**
-
-```bash
-curl -X POST http://localhost:8080/api/v1/snapshots \
-  -H "Content-Type: application/json" \
-  -d '{"license_plate": "A777AA77", "color": "black", "speed": 180}'
-```
-
-**Получить все записи (без ID):**
-
-```bash
-curl http://localhost:8080/api/v1/snapshots
-```
-
-**Получить записи с фильтрами (черные машины, скорость от 100 до 200):**
-
-```bash
-curl "http://localhost:8080/api/v1/snapshots?color=black&speed_from=100&speed_to=200"
-```
-
-#### Windows (PowerShell)
-
-В PowerShell стандартный `curl` имеет проблемы с экранированием кавычек и кириллицей. Рекомендуется использовать нативный командлет `Invoke-RestMethod`, который сам корректно формирует JSON.
-
-**Создать снимок:**
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8080/api/v1/snapshots" -Method Post -Body (@{license_plate="A777AA77"; color="black"; speed=180} | ConvertTo-Json) -ContentType "application/json"
-```
-
-**Получить записи с фильтрами:**
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8080/api/v1/snapshots?color=black&speed_from=100"
-```
-
-Если вы всё же хотите использовать `curl.exe` в PowerShell, используйте удвоение кавычек:
-
-```powershell
-curl.exe -X POST http://localhost:8080/api/v1/snapshots -H "Content-Type: application/json" -d "{""license_plate"":""A777AA77"",""color"":""black"",""speed"":180}"
-```
-
-### gRPC API
-
-Для тестирования gRPC используйте встроенный клиент:
+Для проверки правильности работы API используйте встроенные тестовые клиенты:
 
 ```bash
 go run cmd/client/main.go
 ```
 
-Клиент подключится к серверу на порту `50051`, выполнит тестовые запросы и выведет результаты в консоль.
+Клиент проверяет:
+- Создание снимка (POST / gRPC CreateSnapshot).
+- Получение всех записей (GET / gRPC ListSnapshots).
+- Фильтрацию по цвету.
+- Отсутствие поля `id` в ответе списка записей.
+- Валидацию номера машины (длиннее 10 символов должен отклоняться).
 
-Альтернативно, вы можете использовать Postman (версия 10+), Insomnia или BloomRPC. Для этого импортируйте файл `proto/camera.proto` и укажите адрес `localhost:50051`.
+Пример вывода:
 
-## Бенчмарк REST vs gRPC
+```
+Запуск тестовых клиентов REST и gRPC
 
-Проект включает встроенный бенчмарк, который сравнивает производительность REST и gRPC с учётом времени работы базы данных.
+REST API (HTTP)
+----------------------------------------
+  [PASS] Create: создан снимок с id=152, timestamp=2023-10-27T18:00:00Z
+  [PASS] List All: получено 152 записей
+  [PASS] List Filter: по фильтру color=test_color_1698430000 найдено 1 записей, все с корректным цветом
+  [PASS] List No ID: поле id отсутствует во всех 152 записях
+  [PASS] Create Validation: сервер отклонил номер длиннее 10 символов (статус 400)
 
-### Запуск бенчмарка
+gRPC API
+----------------------------------------
+  [PASS] Create: создан снимок с id=153, timestamp=2023-10-27T18:00:01Z
+  [PASS] List All: получено 153 записей
+  [PASS] List Filter: по фильтру color=test_grpc_color_1698430001 найдено 1 записей, все с корректным цветом
+  [PASS] Create Validation: сервер отклонил номер длиннее 10 символов
 
-Убедитесь, что сервер запущен, и выполните:
+Итоговые результаты:
+REST: 5/5 тестов пройдено
+gRPC: 4/4 тестов пройдено
+
+ВСЕ ТЕСТЫ ПРОЙДЕНЫ УСПЕШНО
+```
+
+## Бенчмарк производительности
+
+Для сравнения производительности REST и gRPC используйте бенчмарк:
 
 ```bash
-go run cmd/client/main.go
+go run cmd/bench/main.go
 ```
 
 ### Что измеряет бенчмарк
@@ -210,6 +187,54 @@ gRPC List:        5.80ms (Overhead: 520µs)
 
 gRPC показывает преимущество при сложных вложенных структурах, больших объёмах данных, сетевом взаимодействии между разными машинами и множественных последовательных вызовах.
 
+## Ручное тестирование REST API
+
+### Linux / macOS (Bash / Zsh)
+
+Используйте стандартный `curl`. Обратите внимание на одинарные кавычки для JSON, чтобы избежать проблем с экранированием.
+
+**Создать снимок:**
+
+```bash
+curl -X POST http://localhost:8080/api/v1/snapshots \
+  -H "Content-Type: application/json" \
+  -d '{"license_plate": "A777AA77", "color": "black", "speed": 180}'
+```
+
+**Получить все записи (без ID):**
+
+```bash
+curl http://localhost:8080/api/v1/snapshots
+```
+
+**Получить записи с фильтрами (черные машины, скорость от 100 до 200):**
+
+```bash
+curl "http://localhost:8080/api/v1/snapshots?color=black&speed_from=100&speed_to=200"
+```
+
+### Windows (PowerShell)
+
+В PowerShell стандартный `curl` имеет проблемы с экранированием кавычек и кириллицей. Рекомендуется использовать нативный командлет `Invoke-RestMethod`, который сам корректно формирует JSON.
+
+**Создать снимок:**
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8080/api/v1/snapshots" -Method Post -Body (@{license_plate="A777AA77"; color="black"; speed=180} | ConvertTo-Json) -ContentType "application/json"
+```
+
+**Получить записи с фильтрами:**
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8080/api/v1/snapshots?color=black&speed_from=100"
+```
+
+Если вы всё же хотите использовать `curl.exe` в PowerShell, используйте удвоение кавычек:
+
+```powershell
+curl.exe -X POST http://localhost:8080/api/v1/snapshots -H "Content-Type: application/json" -d "{""license_plate"":""A777AA77"",""color"":""black"",""speed"":180}"
+```
+
 ## Возможные проблемы и решения
 
 ### Ошибка `package ... is not in std` при запуске
@@ -250,3 +275,9 @@ $env:CGO_ENABLED="1"
 - **Transport** — HTTP и gRPC серверы, зависят от Service.
 
 Одна и та же бизнес-логика (`internal/service`) обслуживает оба транспортных протокола без дублирования кода. Это позволяет легко добавлять новые протоколы (например, GraphQL) без изменения бизнес-логики.
+
+Разделение инструментов тестирования:
+- **`cmd/client`** — функциональные тесты: проверяют корректность работы API, валидацию данных, правильность фильтров.
+- **`cmd/bench`** — нагрузочные тесты: измеряют производительность протоколов без проверки бизнес-логики.
+
+Это стандартная практика в разработке: функциональные тесты и тесты производительности всегда разделяют, так как они решают разные задачи и могут запускаться независимо.
