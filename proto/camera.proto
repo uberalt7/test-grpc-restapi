@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package camera;
+option go_package = "internal/gen/camera";
+
+import "google/protobuf/timestamp.proto";
+
+service CameraService {
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+}
+
+message CreateSnapshotRequest {
+  string license_plate = 1;
+  string color = 2;
+  int32 speed = 3;
+}
+
+message CreateSnapshotResponse {
+  int64 id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+message SnapshotFilter {
+  google.protobuf.Timestamp time_from = 1;
+  google.protobuf.Timestamp time_to = 2;
+  string color = 3;
+  int32 speed_from = 4;
+  int32 speed_to = 5;
+}
+
+message ListSnapshotsRequest {
+  SnapshotFilter filter = 1;
+}
+
+// В ответе для списка ID не возвращаем
+message Snapshot {
+  string license_plate = 1;
+  string color = 2;
+  int32 speed = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+}
